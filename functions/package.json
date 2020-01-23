@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "@google-cloud/storage": "^4.3.0",
+    "ffmpeg-static": "^3.0.0",
+    "fluent-ffmpeg": "^2.1.2"
+  }
+}
