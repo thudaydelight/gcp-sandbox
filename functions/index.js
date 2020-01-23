@@ -6,6 +6,8 @@ const path = require('path')
 const process = require('child_process')
 const storage = require('@google-cloud/storage')
 
+// TODO: validation
+
 exports.mp4ToHls = async (data, context, callback) => {
   console.log(`ffmpegPath: ${ffmpegPath}`)
   console.log(`data: ${JSON.stringify(data)}`)
