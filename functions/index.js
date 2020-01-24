@@ -6,12 +6,23 @@ const path = require('path')
 const process = require('child_process')
 const storage = require('@google-cloud/storage')
 
-// TODO: validation
+const isValid = (data, context) => {
+  return data.contentType === 'video/mp4' &&
+    data.name.endsWith('.mp4') &&
+    context.eventType === 'google.storage.object.finalize'
+}
 
 exports.mp4ToHls = async (data, context, callback) => {
-  console.log(`ffmpegPath: ${ffmpegPath}`)
   console.log(`data: ${JSON.stringify(data)}`)
   console.log(`context: ${JSON.stringify(context)}`)
+
+  if (!isValid(data, context)) {
+    console.log('invalid data or invalid context.')
+
+    callback()
+
+    return
+  }
 
   const gcs = new storage.Storage()
 
@@ -59,11 +70,13 @@ exports.mp4ToHls = async (data, context, callback) => {
       console.log(stdout)
 
       fs.readdirSync(info.localHlsDirectory).forEach(async (fileName) => {
-        console.log(fileName)
-
         const src = path.join(info.localHlsDirectory, fileName)
         const dest = path.join(info.bucketHlsDirectory, fileName)
 
+        console.log(`upload "${src}" to "${dest}"`)
+
+        // TODO: Better to run in parallel
+        // TODO: It might be better to upload to another bucket
         await gcs.bucket(data.bucket).upload(src, { destination: dest })
       })
 
