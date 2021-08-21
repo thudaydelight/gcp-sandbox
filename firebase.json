@@ -1,0 +1,21 @@
+{
+  "functions": {
+    "source": "functions",
+    "runtime": "nodejs12"
+  },
+  "emulators": {
+    "functions": {
+      "port": 5002
+    },
+    "storage": {
+      "port": 9190
+    },
+    "ui": {
+      "enabled": true,
+      "port": 5000
+    }
+  },
+  "storage": {
+    "rules": "storage.rules"
+  }
+}

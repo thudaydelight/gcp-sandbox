@@ -1,93 +1,85 @@
-const ffmpeg = require('fluent-ffmpeg')()
+const ffmpeg = require('fluent-ffmpeg')
 const ffmpegPath = require('ffmpeg-static')
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
-const process = require('child_process')
-const storage = require('@google-cloud/storage')
+const admin = require('firebase-admin')
+const functions = require('firebase-functions')
+
+admin.initializeApp()
 
 const isValid = (data, context) => {
-  return data.contentType === 'video/mp4' &&
-    data.name.endsWith('.mp4') &&
-    context.eventType === 'google.storage.object.finalize'
+    return (data.contentType === 'video/mp4' || data.contentType === 'video/quicktime') &&
+        (data.name.endsWith('.mp4') || data.name.endsWith('.MOV')) &&
+        context.eventType === 'google.storage.object.finalize' && !data.name.includes('video_compressed')
 }
 
-exports.mp4ToHls = async (data, context, callback) => {
-  console.log(`data: ${JSON.stringify(data)}`)
-  console.log(`context: ${JSON.stringify(context)}`)
+function promisifyCommand(command) {
+    return new Promise((resolve, reject) => {
+        command.on('end', resolve).on('error', reject).run();
+    });
+}
 
-  if (!isValid(data, context)) {
-    console.log('invalid data or invalid context.')
+exports.mp4ToHls = functions
+    .runWith({memory: "8GB", timeoutSeconds: 540})
+    .storage.object()
+    .onFinalize(
+        async (data, context, callback) => {
+            if (!isValid(data, context)) {
+                console.log('invalid data or invalid context.')
 
-    callback()
+                return
+            }
 
-    return
-  }
+            const outputDir = path.join(os.tmpdir(), "output")
+            fs.mkdirSync(outputDir, {recursive: true})
+            const downloadDir = path.join(os.tmpdir(), "download")
+            fs.mkdirSync(downloadDir, {recursive: true})
 
-  const gcs = new storage.Storage()
+            const downloadPath = path.join(downloadDir, data.name);
+            const outputPath = path.join(outputDir, data.name + '-1280x720.mp4');
 
-  const info = {}
+            console.log(`download path: ${downloadPath}`)
+            console.log(`outputPath : ${outputPath}`)
+            await admin.storage().bucket(data.bucket).file(data.name).download({destination: downloadPath}).then((reskt) => {
+                console.log("downloaded" + getFilesizeInBytes(downloadPath))
+            }).catch((error) => {
+                console.error(`error when download: ${error.toString()}`)
+            })
+            try {
+                let command = ffmpeg(downloadPath)
+                    .setFfmpegPath(ffmpegPath)
+                    .output(outputPath)
+                    .videoCodec('libx264')
+                    .size('1280x720')
+                await promisifyCommand(command);
+                console.log(`Size of compressed file: ${getFilesizeInBytes(outputPath)}`)
+                await admin.storage().bucket(data.bucket).upload(outputPath, {
+                    destination: "video_compressed/compressed.mp4",
+                    metadata: {
+                        compressed: true
+                    }
+                }).catch((error) => {
+                    console.error(error)
+                }).then(async (result) => {
 
-  info.mp4DirectoryName = 'mp4'
-  info.hlsDirectoryName = 'hls'
-  info.baseName = path.basename(data.name, '.mp4')
-  info.keyFileName = `${info.baseName}.key`
-  info.iv = process.execSync('openssl rand -hex 16').toString()
+                    console.log(result[1])
+                    console.log("Upload result" + JSON.stringify(result[1]))
+                })
+            } catch (e) {
+                console.error(e)
+            } finally {
+                fs.unlink(downloadPath, (error) => {
+                        console.error(error)
+                    }
+                )
+                fs.unlink(outputPath, (error) => {
+                    console.error(error)
+                })
+            }
+        })
 
-  info.bucketMp4Directory = path.join(info.mp4DirectoryName, info.baseName)
-  info.bucketHlsDirectory = path.join(info.hlsDirectoryName, info.baseName)
-  info.bucketHlsKeyFilePath = path.join(info.bucketHlsDirectory, info.keyFileName)
-
-  info.localMp4Directory = path.join(os.tmpdir(), info.bucketMp4Directory)
-  info.localHlsDirectory = path.join(os.tmpdir(), info.bucketHlsDirectory)
-  info.localHlsKeyFilePath = path.join(info.localHlsDirectory, info.keyFileName)
-  info.localMp4FilePath = path.join(info.localMp4Directory, path.basename(data.name))
-  info.localHlsFilePath = path.join(info.localHlsDirectory, `${info.baseName}.m3u8`)
-  info.localKeyInfoPath = path.join(os.tmpdir(), 'keyinfo')
-
-  console.log(`info: ${JSON.stringify(info)}`)
-
-  fs.mkdirSync(info.localMp4Directory, { recursive: true })
-  fs.mkdirSync(info.localHlsDirectory, { recursive: true })
-
-  process.execSync(`openssl rand 16 > ${info.localHlsKeyFilePath}`)
-
-  fs.writeFileSync(info.localKeyInfoPath, [info.keyFileName, info.localHlsKeyFilePath, info.iv].join('\n'))
-
-  await gcs.bucket(data.bucket).file(data.name).download({ destination: info.localMp4FilePath })
-
-  ffmpeg
-    .setFfmpegPath(ffmpegPath)
-    .input(info.localMp4FilePath)
-    .output(info.localHlsFilePath)
-    .outputOptions([
-      '-codec: copy',
-      '-hls_time 10',
-      '-hls_list_size 0',
-      `-hls_key_info_file ${info.localKeyInfoPath}`,
-    ])
-    .on('end', (error, stdout) => {
-      console.log(stdout)
-
-      fs.readdirSync(info.localHlsDirectory).forEach(async (fileName) => {
-        const src = path.join(info.localHlsDirectory, fileName)
-        const dest = path.join(info.bucketHlsDirectory, fileName)
-
-        console.log(`upload "${src}" to "${dest}"`)
-
-        // TODO: Better to run in parallel
-        // TODO: It might be better to upload to another bucket
-        await gcs.bucket(data.bucket).upload(src, { destination: dest })
-      })
-
-      callback()
-    })
-    .on('error', (error, stdout, stderr) => {
-      console.log(error)
-      console.log(stdout)
-      console.log(stderr)
-
-      callback()
-    })
-    .run()
+function getFilesizeInBytes(filename) {
+    const stats = fs.statSync(filename);
+    return stats.size;
 }
